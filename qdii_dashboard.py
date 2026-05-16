@@ -8,7 +8,7 @@ from streamlit_autorefresh import st_autorefresh
 # ==================== 1. 基础配置与自动刷新 ====================
 st.set_page_config(page_title="QDII 智投工作台", layout="wide", initial_sidebar_state="collapsed")
 
-# 激活自动刷新 (60秒刷新一次，安全防封)
+# 自动刷新保持在 60 秒
 st_autorefresh(interval=60000, limit=1000, key="data_refresh")
 
 HEADERS = {
@@ -22,34 +22,43 @@ FUND_POOL = {
     "018738": {"name": "博时标普500(QDII)A", "baseline": 300, "max_limit": 2000, "etf": "105.SPY"}
 }
 
-# ==================== 2. 核心算法数据抓取 ====================
-def get_data(fund_code, etf_id):
-    try:
-        f_url = f"http://api.fund.eastmoney.com/f10/lsjz?fundCode={fund_code}&pageIndex=1&pageSize=20"
-        res = requests.get(f_url, headers=HEADERS, timeout=5).json()
-        nav_data = res['Data']['LSJZList']
-        latest_nav = float(nav_data[0]['DWJZ'])
-        prev_nav = float(nav_data[1]['DWJZ'])
-        high_nav = max([float(i['DWJZ']) for i in nav_data])
-        daily_gain = (latest_nav - prev_nav) / prev_nav * 100
-    except:
-        return None
+# ==================== 2. 核心算法数据抓取 (加入硬核高速缓存) ====================
+@st.cache_data(ttl=60) # 👈 核心优化：允许数据在内存中保鲜 60 秒，期间切换标签秒开！
+def fetch_all_market_data():
+    results = {}
+    for code, info in FUND_POOL.items():
+        # 1. 抓取基金净值
+        try:
+            f_url = f"http://api.fund.eastmoney.com/f10/lsjz?fundCode={code}&pageIndex=1&pageSize=20"
+            res = requests.get(f_url, headers=HEADERS, timeout=3).json()
+            nav_data = res['Data']['LSJZList']
+            latest_nav = float(nav_data[0]['DWJZ'])
+            prev_nav = float(nav_data[1]['DWJZ'])
+            high_nav = max([float(i['DWJZ']) for i in nav_data])
+            daily_gain = (latest_nav - prev_nav) / prev_nav * 100
+        except:
+            continue
 
-    try:
-        e_url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={etf_id}&fields=f3,f192"
-        e_res = requests.get(e_url, headers=HEADERS, timeout=5).json()
-        f3, f192 = e_res['data']['f3'], e_res['data']['f192']
-        reg_pct = float(f3) if f3 not in ["-", None] else 0.0
-        ext_pct = float(f192) if f192 not in ["-", None] else 0.0
-        
-        if reg_pct == 0:
-            k_url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={etf_id}&fields1=f1&fields2=f59&klt=101&lmt=1"
-            k_res = requests.get(k_url, timeout=5).json()
-            reg_pct = float(k_res['data']['klines'][0].split(',')[1])
-    except:
-        reg_pct, ext_pct = 0.0, 0.0
+        # 2. 抓取美股 ETF (正盘 + 夜盘)
+        try:
+            e_url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={info['etf']}&fields=f3,f192"
+            e_res = requests.get(e_url, headers=HEADERS, timeout=3).json()
+            f3, f192 = e_res['data']['f3'], e_res['data']['f192']
+            reg_pct = float(f3) if f3 not in ["-", None] else 0.0
+            ext_pct = float(f192) if f192 not in ["-", None] else 0.0
+            
+            if reg_pct == 0:
+                k_url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={info['etf']}&fields1=f1&fields2=f59&klt=101&lmt=1"
+                k_res = requests.get(k_url, timeout=3).json()
+                reg_pct = float(k_res['data']['klines'][0].split(',')[1])
+        except:
+            reg_pct, ext_pct = 0.0, 0.0
 
-    return {"nav": latest_nav, "high": high_nav, "daily": daily_gain, "reg": reg_pct, "ext": ext_pct}
+        results[code] = {
+            "nav": latest_nav, "high": high_nav, "daily": daily_gain, 
+            "reg": reg_pct, "ext": ext_pct
+        }
+    return results
 
 def get_strategy(drop_pct, baseline, limit):
     if drop_pct >= 15: buy, tag = baseline + 8000, "🔴 15% 深度回撤"
@@ -74,7 +83,9 @@ ny_time_str = now_ny.strftime('%Y-%m-%d %H:%M:%S')
 
 # 判断美股盘面阶段
 ny_time_float = now_ny.hour + now_ny.minute / 60.0
-if now_ny.weekday() >= 5:
+if now_ny.weekday() >= 6: # 周日
+    market_status = " 💤 周末休市中"
+elif now_ny.weekday() == 5: # 周六
     market_status = " 💤 周末休市中"
 elif 4.0 <= ny_time_float < 9.5:
     market_status = " 🌅 美股盘前交易 (Pre-market)"
@@ -85,7 +96,7 @@ elif 16.0 <= ny_time_float < 20.0:
 else:
     market_status = " 🌙 美股夜盘/停盘时段"
 
-# 渲染顶部双时区仪表盘
+# 渲染顶部双时区
 st.markdown(f"""
 | 📍 观察哨位置 | 📅 实时当前时间 | 🕒 当前盘面状态 |
 | :--- | :--- | :--- |
@@ -94,17 +105,20 @@ st.markdown(f"""
 """)
 st.divider() 
 
+# 统一获取缓存池数据
+all_data = fetch_all_market_data()
+
 # 创建双标签页
 tab1, tab2 = st.tabs(["💰 核心建仓与预测", "📅 宏观风向与事件日历"])
 
-# ==================== Tab 1: 核心建仓 (内部已精确缩进) ====================
+# ==================== Tab 1: 核心建仓 ====================
 with tab1:
     for code, info in FUND_POOL.items():
-        data = get_data(code, info['etf'])
-        if not data:
+        if code not in all_data:
             st.error(f"{info['name']} 数据加载失败")
             continue
-
+        
+        data = all_data[code]
         drop = (data['high'] - data['nav']) / data['high'] * 100
         total_impact = ((1 + data['reg']/100) * (1 + data['ext']/100) - 1) * 100
         est_nav = data['nav'] * (1 + total_impact/100)
@@ -132,7 +146,7 @@ with tab1:
 
     st.success("提示：15:00 前申购按当晚美股收盘价结算。请结合宏观日历执行定投。")
 
-# ==================== Tab 2: 宏观日历 (内部已精确缩进) ====================
+# ==================== Tab 2: 宏观日历 ====================
 with tab2:
     st.header("🧠 纳指/标普核心驱动因子")
     with st.expander("展开查看：什么事情会引发美股暴涨或暴跌？", expanded=False):
