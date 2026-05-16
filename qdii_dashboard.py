@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
@@ -22,8 +22,8 @@ FUND_POOL = {
     "018738": {"name": "博时标普500(QDII)A", "baseline": 300, "max_limit": 2000, "etf": "105.SPY"}
 }
 
-# ==================== 2. 核心算法数据抓取 (加入硬核高速缓存) ====================
-@st.cache_data(ttl=60) # 👈 核心优化：允许数据在内存中保鲜 60 秒，期间切换标签秒开！
+# ==================== 2. 核心算法数据抓取 (缓存 60 秒防卡) ====================
+@st.cache_data(ttl=60)
 def fetch_all_market_data():
     results = {}
     for code, info in FUND_POOL.items():
@@ -60,6 +60,45 @@ def fetch_all_market_data():
         }
     return results
 
+# ==================== 3. 动态宏观事件抓取引擎 (核心新增) ====================
+@st.cache_data(ttl=3600) # 宏观事件不需要一分钟一刷，设置 1 小时缓存即可，大幅加快速度
+def fetch_live_macro_calendar():
+    """全自动穿透抓取未来7天美国重磅金融事件"""
+    event_list = []
+    today = datetime.now(ZoneInfo("Asia/Shanghai"))
+    
+    # 获取未来 7 天的日期序列
+    for i in range(7):
+        target_date = (today + timedelta(days=i)).strftime("%Y-%m-%d")
+        url = f"https://rili.jin10.com/api/day/{target_date}/economic"
+        headers = {"x-app-id": "rili", "user-agent": "Mozilla/5.0"}
+        
+        try:
+            res = requests.get(url, headers=headers, timeout=4).json()
+            for item in res.get('data', []):
+                # 策略强过滤：国家必须是美国(US)，且重要性星级必须 >= 3星
+                if item.get('country') == '美国' and int(item.get('star', 0)) >= 3:
+                    stars = "⭐" * int(item.get('star', 0))
+                    pub_time = item.get('pub_time', '')
+                    time_short = pub_time.split(" ")[1] if " " in pub_time else pub_time
+                    
+                    event_list.append({
+                        "日期": item.get('date', target_date),
+                        "发布时间 (BJ)": time_short,
+                        "指标/重磅事件": item.get('title', ''),
+                        "重要等级": stars,
+                        "前值": item.get('previous', '-'),
+                        "预测值": item.get('consensus', '-')
+                    })
+        except:
+            pass
+            
+    if not event_list:
+        return pd.DataFrame([{"提示": "暂无未来一星期的美国重大事件数据，请稍后刷新重试"}])
+        
+    df = pd.DataFrame(event_list)
+    return df.sort_values(by=["日期", "发布时间 (BJ)"])
+
 def get_strategy(drop_pct, baseline, limit):
     if drop_pct >= 15: buy, tag = baseline + 8000, "🔴 15% 深度回撤"
     elif drop_pct >= 10: buy, tag = baseline + 5000, "🟠 10% 中度回撤"
@@ -71,32 +110,23 @@ def get_strategy(drop_pct, baseline, limit):
     is_max = " (触顶!)" if buy >= limit else ""
     return final_buy, f"{tag}{is_max}"
 
-# ==================== 3. 网页布局与时区对齐 ====================
+# ==================== 4. 网页布局与双时区对齐 ====================
 st.title("📈 美股 QDII 智投工作台")
 
-# 获取北京时间和纽约时间
 now_bj = datetime.now(ZoneInfo("Asia/Shanghai"))
 now_ny = datetime.now(ZoneInfo("America/New_York"))
 
 bj_time_str = now_bj.strftime('%Y-%m-%d %H:%M:%S')
 ny_time_str = now_ny.strftime('%Y-%m-%d %H:%M:%S')
 
-# 判断美股盘面阶段
 ny_time_float = now_ny.hour + now_ny.minute / 60.0
-if now_ny.weekday() >= 6: # 周日
-    market_status = " 💤 周末休市中"
-elif now_ny.weekday() == 5: # 周六
-    market_status = " 💤 周末休市中"
-elif 4.0 <= ny_time_float < 9.5:
-    market_status = " 🌅 美股盘前交易 (Pre-market)"
-elif 9.5 <= ny_time_float < 16.0:
-    market_status = " 🟢 美股正盘交易 (Regular Session)"
-elif 16.0 <= ny_time_float < 20.0:
-    market_status = " 🌆 美股盘后交易 (After-hours)"
-else:
-    market_status = " 🌙 美股夜盘/停盘时段"
+if now_ny.weekday() >= 6: market_status = " 💤 周末休市中"
+elif now_ny.weekday() == 5: market_status = " 💤 周末休市中"
+elif 4.0 <= ny_time_float < 9.5: market_status = " 🌅 美股盘前交易 (Pre-market)"
+elif 9.5 <= ny_time_float < 16.0: market_status = " 🟢 美股正盘交易 (Regular Session)"
+elif 16.0 <= ny_time_float < 20.0: market_status = " 🌆 美股盘后交易 (After-hours)"
+else: market_status = " 🌙 美股夜盘/停盘时段"
 
-# 渲染顶部双时区
 st.markdown(f"""
 | 📍 观察哨位置 | 📅 实时当前时间 | 🕒 当前盘面状态 |
 | :--- | :--- | :--- |
@@ -105,11 +135,11 @@ st.markdown(f"""
 """)
 st.divider() 
 
-# 统一获取缓存池数据
+# 统一读取数据流
 all_data = fetch_all_market_data()
 
 # 创建双标签页
-tab1, tab2 = st.tabs(["💰 核心建仓与预测", "📅 宏观风向与事件日历"])
+tab1, tab2 = st.tabs(["💰 核心建仓与预测", "📅 实时动态宏观雷达"])
 
 # ==================== Tab 1: 核心建仓 ====================
 with tab1:
@@ -144,26 +174,24 @@ with tab1:
             with c_right:
                 st.info(f"👉 动作: **{action}** -> 申购: **¥{buy_amt}**")
 
-    st.success("提示：15:00 前申购按当晚美股收盘价结算。请结合宏观日历执行定投。")
+    st.success("提示：15:00 前申购按当晚美股收盘价结算。")
 
-# ==================== Tab 2: 宏观日历 ====================
+# ==================== Tab 2: 动态宏观日历 (全新注入) ====================
 with tab2:
     st.header("🧠 纳指/标普核心驱动因子")
-    with st.expander("展开查看：什么事情会引发美股暴涨或暴跌？", expanded=False):
+    with st.expander("展开复习：什么事情会引发美股暴涨或暴跌？", expanded=False):
         st.markdown("""
-        * **🦅 美联储利率决议 (FOMC会议)：** 现任主席沃什主张缩表。如果放出强缩表信号，流动性收紧，科技股暴跌；反之则暴涨。
-        * **🛒 核心通胀数据 (CPI / PCE)：** 如果通胀数据高于预期，市场担忧继续加息，大盘大跌；反之则大涨。
-        * **👷 就业数据 (非农 NFP)：** 失业率猛增会引发衰退交易大跌；就业过分火爆引发通胀担忧也会跌；适中则涨。
-        * **💻 科技巨头财报 (英伟达等)：** 纳指100权重高度集中。如果巨头对未来的 AI 盈利指引不及预期，纳指将遭遇重挫。
+        * **🦅 美联储利率决议 (FOMC)：** 现任主席沃什主张缩表。释放流动性紧缩信号则科技股暴跌，反之大涨。
+        * **🛒 核心通胀数据 (CPI / PCE)：** 通胀超预期则市场担忧加息，大盘大跌；通胀降温则杀估值警报解除，科技股大涨。
+        * **👷 就业数据 (非农 NFP / 失业率)：** 失业率过高引发衰退交易（大跌）；就业过分火爆引发通胀死灰复燃（大跌）。
         """)
 
-    st.header("🗓️ 近期重磅宏观事件日历 (未来30天)")
-    calendar_data = [
-        {"日期 (北京时间)": "2026年5月22日 (周五)", "重磅事件": "🇺🇸 美国5月制造业/服务业PMI", "预期影响等级": "⭐⭐", "多空逻辑预判": "PMI跌破50荣枯线可能引发衰退恐慌，科技股承压。"},
-        {"日期 (北京时间)": "2026年5月29日 (周五)", "重磅事件": "🛒 美国4月核心PCE物价指数", "预期影响等级": "⭐⭐⭐⭐", "多空逻辑预判": "美联储通胀金标准。若反弹纳指杀估值，若回落迎来大反弹。"},
-        {"日期 (北京时间)": "2026年6月5日  (周五)", "重磅事件": "👷 美国5月非农就业报告 (NFP)", "预期影响等级": "⭐⭐⭐⭐", "多空逻辑预判": "关注失业率。数据若异常强劲，将粉碎降息预期。"},
-        {"日期 (北京时间)": "2026年6月11日 (周四)", "重磅事件": "📉 美国5月CPI数据", "预期影响等级": "⭐⭐⭐⭐⭐", "多空逻辑预判": "直接决定次周议息基调。CPI超预期将引发大盘全线抛售。"},
-        {"日期 (北京时间)": "2026年6月18日 (周四)", "重磅事件": "🦅 美联储FOMC利率决议 + 沃什讲话", "预期影响等级": "⭐⭐⭐⭐⭐", "多空逻辑预判": "重磅大戏！沃什对缩表的表态将决定标普与纳指长期拐点，波动极剧烈。"}
-    ]
-    st.dataframe(pd.DataFrame(calendar_data), hide_index=True, use_container_width=True)
-    st.info("💡 操作心法：遇到五星级事件前夕切忌追高；若事件落地引发暴跌，按系统提示的高额度果断吸纳筹码！")
+    st.header("🗓️ 实时追踪：未来7天美股重磅事件")
+    st.write("以下数据由系统自动抓取，包含当前时间向后推移7天内的**所有美国3星级以上核心经济数据**：")
+    
+    # 动态调取金十实时日历数据
+    with st.spinner("正在穿透公网拉取最新宏观日历..."):
+        df_live_calendar = fetch_live_macro_calendar()
+        
+    st.dataframe(df_live_calendar, hide_index=True, use_container_width=True)
+    st.info("💡 **实战雷达提示：** 如果表格中出现了 4 星（⭐⭐⭐⭐）或 5 星（⭐⭐⭐⭐⭐）的数据（如核心 CPI、PCE、非农、利率决议），在其发布当日下午 14:45，大盘往往极度敏感。如果伴随盘前大幅下杀，可根据 Tab 1 的策略提示执行防御性加仓。")
