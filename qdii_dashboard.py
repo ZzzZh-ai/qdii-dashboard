@@ -70,12 +70,11 @@ def get_strategy(drop_pct, baseline, limit):
     return final_buy, f"{tag}{is_max}"
 
 
-# --- 3. 网页布局：双标签页体系 ---
+# ==================== 3. 网页布局：双标签页体系 ====================
 st.title("📈 美股 QDII 智投工作台")
 
-# 👈 11.3 升级：双时区自动夏令时对齐逻辑
-from datetime import datetime
-from zoneinfo import ZoneInfo # Python 3.9+ 自带，完美处理美东夏令时
+# --- 3.1 双时区夏令时对齐逻辑 ---
+from zoneinfo import ZoneInfo
 
 # 动态获取北京时间和纽约时间
 now_bj = datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -84,7 +83,7 @@ now_ny = datetime.now(ZoneInfo("America/New_York"))
 bj_time_str = now_bj.strftime('%Y-%m-%d %H:%M:%S')
 ny_time_str = now_ny.strftime('%Y-%m-%d %H:%M:%S')
 
-# 判断美股当前处于什么盘面阶段
+# 判断美股当前盘面阶段
 ny_hour = now_ny.hour
 ny_minute = now_ny.minute
 ny_time_float = ny_hour + ny_minute / 60.0
@@ -100,14 +99,21 @@ elif 16.0 <= ny_time_float < 20.0:
 else:
     market_status = " 🌙 美股夜盘/停盘时段"
 
-# 在网页顶部整齐渲染双时区
+# 在网页顶部渲染双时区表格
 st.markdown(f"""
 | 📍 观察哨位置 | 📅 实时当前时间 | 🕒 当前盘面状态 |
 | :--- | :--- | :--- |
 | **北京时间 (CN)** | `{bj_time_str}` | 截单倒计时/隔夜复盘 |
 | **纽约时间 (US)** | `{ny_time_str}` | **{market_status}** |
 """)
-st.divider() # 加一条分割线
+st.divider() 
+
+# --- 3.2 标签页创建 (核心修复点！确保这一行稳稳躺在这里) ---
+tab1, tab2 = st.tabs(["💰 核心建仓与预测", "📅 宏观风向与事件日历"])
+
+# ==================== Tab 1: 核心建仓 ====================
+with tab1:
+    # ... (下面保持你原有的循环和计算逻辑不变) ...
 
 # ==================== Tab 1: 核心建仓 (保持原有硬核功能) ====================
 with tab1:
